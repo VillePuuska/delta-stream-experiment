@@ -26,14 +26,17 @@ def get_spark_session_with_delta() -> SparkSession:
     return spark
 
 
-def initialize_delta_table(spark: SparkSession) -> None:
+def initialize_delta_table(spark: SparkSession, partitioned: bool) -> None:
     if DeltaTable.isDeltaTable(spark, TABLE_PATH):
         return
 
     dt = DeltaTable.create(spark)
     dt.tableName("demo_table").addColumn("id", "int").addColumn("val", "int").location(
         TABLE_PATH
-    ).property("delta.enableChangeDataFeed", "true").execute()
+    ).property("delta.enableChangeDataFeed", "true")
+    if partitioned:
+        dt = dt.partitionedBy("id")
+    dt.execute()
 
     df = spark.createDataFrame([(1, 1), (2, 999)], schema="id INT, val INT").coalesce(1)
     df.write.format("delta").mode("overwrite").save(TABLE_PATH)
@@ -63,7 +66,11 @@ def updates(
 def stream(
     spark: SparkSession,
     stream_type: Literal[
-        "default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"
+        "default",
+        "ignoreDeletes",
+        "ignoreChanges",
+        "skipChangeCommits",
+        "readChangeFeed",
     ],
 ) -> None:
     stream_df_builder = spark.readStream.format("delta").option("startingVersion", 0)
@@ -76,7 +83,7 @@ def stream(
             stream_df_builder = stream_df_builder.option("ignoreChanges", "true")
         case "skipChangeCommits":
             stream_df_builder = stream_df_builder.option("skipChangeCommits", "true")
-        case "cdf":
+        case "readChangeFeed":
             stream_df_builder = stream_df_builder.option("readChangeFeed", "true")
         case _:
             raise ValueError(f"Unknown stream type: {stream_type}")
@@ -115,22 +122,38 @@ def stream(
     type=click.Choice(["update", "delete", "overwrite"]),
 )
 @click.option(
+    "--partitioned",
+    is_flag=True,
+    help="Whether to partition the table by id.",
+)
+@click.option(
     "--stream-type",
     default="default",
     help="What option to use for streaming.",
     type=click.Choice(
-        ["default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"]
+        [
+            "default",
+            "ignoreDeletes",
+            "ignoreChanges",
+            "skipChangeCommits",
+            "readChangeFeed",
+        ]
     ),
 )
 def main(
     entrypoint: Literal["updates", "stream"],
     update_type: Literal["update", "delete", "overwrite"],
+    partitioned: bool,
     stream_type: Literal[
-        "default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"
+        "default",
+        "ignoreDeletes",
+        "ignoreChanges",
+        "skipChangeCommits",
+        "readChangeFeed",
     ],
 ) -> None:
     spark = get_spark_session_with_delta()
-    initialize_delta_table(spark)
+    initialize_delta_table(spark=spark, partitioned=partitioned)
 
     match entrypoint:
         case "updates":
