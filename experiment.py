@@ -11,7 +11,8 @@ TABLE_PATH = os.path.join(*os.path.split(__file__)[:-1], "demo-table")
 def get_spark_session_with_delta() -> SparkSession:
     builder = cast(SparkSession.Builder, SparkSession.builder)
     builder = (
-        builder.appName("MyApp")
+        builder.master("local[8]")
+        .appName("delta-stream-experiment")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config(
             "spark.sql.catalog.spark_catalog",
@@ -39,8 +40,21 @@ def initialize_delta_table(spark: SparkSession) -> None:
 def updates(
     spark: SparkSession, update_type: Literal["update", "delete", "overwrite"]
 ) -> None:
-    # Placeholder for the updates entrypoint logic
-    print("Running updates entrypoint")
+    for i in range(2, 16):
+        match update_type:
+            case "update":
+                spark.sql(f"UPDATE delta.`{TABLE_PATH}` SET id = {i}")
+            case "delete":
+                spark.sql(f"DELETE FROM delta.`{TABLE_PATH}`")
+                spark.createDataFrame([(i,)], schema="id INT").write.format(
+                    "delta"
+                ).mode("append").save(TABLE_PATH)
+            case "overwrite":
+                spark.createDataFrame([(i,)], schema="id INT").write.format(
+                    "delta"
+                ).mode("overwrite").save(TABLE_PATH)
+            case _:
+                raise ValueError(f"Unknown update type: {update_type}")
 
 
 def stream(spark: SparkSession) -> None:
