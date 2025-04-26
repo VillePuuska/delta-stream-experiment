@@ -35,7 +35,7 @@ def initialize_delta_table(spark: SparkSession) -> None:
         TABLE_PATH
     ).property("delta.enableChangeDataFeed", "true").execute()
 
-    df = spark.createDataFrame([(1, 1), (2, 999)], schema="id INT, val INT")
+    df = spark.createDataFrame([(1, 1), (2, 999)], schema="id INT, val INT").coalesce(1)
     df.write.format("delta").mode("overwrite").save(TABLE_PATH)
 
 
@@ -55,7 +55,7 @@ def updates(
             case "overwrite":
                 spark.createDataFrame(
                     [(1, i), (2, 999)], schema="id INT, val INT"
-                ).write.format("delta").mode("overwrite").save(TABLE_PATH)
+                ).coalesce(1).write.format("delta").mode("overwrite").save(TABLE_PATH)
             case _:
                 raise ValueError(f"Unknown update type: {update_type}")
 
@@ -94,7 +94,11 @@ def stream(
         query.awaitTermination(120)
     except StreamingQueryException:
         pass
-    print(query.exception())
+
+    exc = query.exception()
+    if exc is not None:
+        print("Streaming query failed with exception:")
+        print(exc)
 
 
 @click.command()
