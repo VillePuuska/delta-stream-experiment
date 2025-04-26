@@ -1,9 +1,9 @@
 import os
-import time
 from typing import Literal, cast
 
 import click
 from delta import DeltaTable, configure_spark_with_delta_pip
+from pyspark.errors.exceptions.captured import StreamingQueryException
 from pyspark.sql import SparkSession
 
 TABLE_PATH = os.path.join(*os.path.split(__file__)[:-1], "demo-table")
@@ -30,34 +30,34 @@ def initialize_delta_table(spark: SparkSession) -> None:
     if DeltaTable.isDeltaTable(spark, TABLE_PATH):
         return
 
-    df = spark.createDataFrame([(1,)], schema="id INT")
-    df.write.format("delta").mode("overwrite").save(TABLE_PATH)
+    dt = DeltaTable.create(spark)
+    dt.tableName("demo_table").addColumn("id", "int").addColumn("val", "int").location(
+        TABLE_PATH
+    ).property("delta.enableChangeDataFeed", "true").execute()
 
-    spark.sql(
-        f"ALTER TABLE delta.`{TABLE_PATH}` SET TBLPROPERTIES (delta.enableChangeDataFeed = true)"
-    )
+    df = spark.createDataFrame([(1, 1), (2, 999)], schema="id INT, val INT")
+    df.write.format("delta").mode("overwrite").save(TABLE_PATH)
 
 
 def updates(
     spark: SparkSession, update_type: Literal["update", "delete", "overwrite"]
 ) -> None:
-    for i in range(2, 16):
-        print(i)
+    for i in range(2, 5):
+        print(f"Update type {update_type}, value {i}")
         match update_type:
             case "update":
-                spark.sql(f"UPDATE delta.`{TABLE_PATH}` SET id = {i}")
+                spark.sql(f"UPDATE delta.`{TABLE_PATH}` SET val = {i} WHERE id = 1")
             case "delete":
-                spark.sql(f"DELETE FROM delta.`{TABLE_PATH}`")
-                spark.createDataFrame([(i,)], schema="id INT").write.format(
+                spark.sql(f"DELETE FROM delta.`{TABLE_PATH}` WHERE id = 1")
+                spark.createDataFrame([(1, i)], schema="id INT, val INT").write.format(
                     "delta"
                 ).mode("append").save(TABLE_PATH)
             case "overwrite":
-                spark.createDataFrame([(i,)], schema="id INT").write.format(
-                    "delta"
-                ).mode("overwrite").save(TABLE_PATH)
+                spark.createDataFrame(
+                    [(1, i), (2, 999)], schema="id INT, val INT"
+                ).write.format("delta").mode("overwrite").save(TABLE_PATH)
             case _:
                 raise ValueError(f"Unknown update type: {update_type}")
-        print("Done")
 
 
 def stream(
@@ -65,49 +65,35 @@ def stream(
     stream_type: Literal[
         "default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"
     ],
-    starting_version: Literal["0", "omit"],
 ) -> None:
-    stream_df_builder = spark.readStream.format("delta")
-    if starting_version != "omit":
-        stream_df_builder = stream_df_builder.option(
-            "startingVersion", starting_version
-        )
+    stream_df_builder = spark.readStream.format("delta").option("startingVersion", 0)
     match stream_type:
         case "default":
-            stream_df = stream_df_builder.load(TABLE_PATH)
+            pass
         case "ignoreDeletes":
-            stream_df = stream_df_builder.option("ignoreDeletes", "true").load(
-                TABLE_PATH
-            )
+            stream_df_builder = stream_df_builder.option("ignoreDeletes", "true")
         case "ignoreChanges":
-            stream_df = stream_df_builder.option("ignoreChanges", "true").load(
-                TABLE_PATH
-            )
+            stream_df_builder = stream_df_builder.option("ignoreChanges", "true")
         case "skipChangeCommits":
-            stream_df = stream_df_builder.option("skipChangeCommits", "true").load(
-                TABLE_PATH
-            )
+            stream_df_builder = stream_df_builder.option("skipChangeCommits", "true")
         case "cdf":
-            stream_df = stream_df_builder.option("readChangeFeed", "true").load(
-                TABLE_PATH
-            )
+            stream_df_builder = stream_df_builder.option("readChangeFeed", "true")
         case _:
             raise ValueError(f"Unknown stream type: {stream_type}")
+
+    stream_df = stream_df_builder.load(TABLE_PATH)
 
     query = (
         stream_df.writeStream.format("console")
         .outputMode("append")
+        .trigger(availableNow=True)
         .option("truncate", "false")
         .start()
     )
     try:
-        for _ in range(120):
-            if not query.isActive:
-                break
-            time.sleep(1)
-    except KeyboardInterrupt:
+        query.awaitTermination(120)
+    except StreamingQueryException:
         pass
-    query.stop()
     print(query.exception())
 
 
@@ -132,19 +118,12 @@ def stream(
         ["default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"]
     ),
 )
-@click.option(
-    "--starting-version",
-    default="omit",
-    help="Starting version for streaming.",
-    type=click.Choice(["0", "omit"]),
-)
 def main(
     entrypoint: Literal["updates", "stream"],
     update_type: Literal["update", "delete", "overwrite"],
     stream_type: Literal[
         "default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"
     ],
-    starting_version: Literal["0", "omit"],
 ) -> None:
     spark = get_spark_session_with_delta()
     initialize_delta_table(spark)
@@ -153,9 +132,7 @@ def main(
         case "updates":
             updates(spark=spark, update_type=update_type)
         case "stream":
-            stream(
-                spark=spark, stream_type=stream_type, starting_version=starting_version
-            )
+            stream(spark=spark, stream_type=stream_type)
         case _:
             raise ValueError(f"Unknown entrypoint: {entrypoint}")
 
