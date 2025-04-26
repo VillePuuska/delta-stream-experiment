@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Literal, cast
 
 import click
@@ -41,6 +42,7 @@ def updates(
     spark: SparkSession, update_type: Literal["update", "delete", "overwrite"]
 ) -> None:
     for i in range(2, 16):
+        print(i)
         match update_type:
             case "update":
                 spark.sql(f"UPDATE delta.`{TABLE_PATH}` SET id = {i}")
@@ -55,11 +57,58 @@ def updates(
                 ).mode("overwrite").save(TABLE_PATH)
             case _:
                 raise ValueError(f"Unknown update type: {update_type}")
+        print("Done")
 
 
-def stream(spark: SparkSession) -> None:
-    # Placeholder for the stream entrypoint logic
-    print("Running stream entrypoint")
+def stream(
+    spark: SparkSession,
+    stream_type: Literal[
+        "default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"
+    ],
+    starting_version: Literal["0", "omit"],
+) -> None:
+    stream_df_builder = spark.readStream.format("delta")
+    if starting_version != "omit":
+        stream_df_builder = stream_df_builder.option(
+            "startingVersion", starting_version
+        )
+    match stream_type:
+        case "default":
+            stream_df = stream_df_builder.load(TABLE_PATH)
+        case "ignoreDeletes":
+            stream_df = stream_df_builder.option("ignoreDeletes", "true").load(
+                TABLE_PATH
+            )
+        case "ignoreChanges":
+            stream_df = stream_df_builder.option("ignoreChanges", "true").load(
+                TABLE_PATH
+            )
+        case "skipChangeCommits":
+            stream_df = stream_df_builder.option("skipChangeCommits", "true").load(
+                TABLE_PATH
+            )
+        case "cdf":
+            stream_df = stream_df_builder.option("readChangeFeed", "true").load(
+                TABLE_PATH
+            )
+        case _:
+            raise ValueError(f"Unknown stream type: {stream_type}")
+
+    query = (
+        stream_df.writeStream.format("console")
+        .outputMode("append")
+        .option("truncate", "false")
+        .start()
+    )
+    try:
+        for _ in range(120):
+            if not query.isActive:
+                break
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    query.stop()
+    print(query.exception())
 
 
 @click.command()
@@ -75,9 +124,27 @@ def stream(spark: SparkSession) -> None:
     help="How to update the table value.",
     type=click.Choice(["update", "delete", "overwrite"]),
 )
+@click.option(
+    "--stream-type",
+    default="default",
+    help="What option to use for streaming.",
+    type=click.Choice(
+        ["default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"]
+    ),
+)
+@click.option(
+    "--starting-version",
+    default="omit",
+    help="Starting version for streaming.",
+    type=click.Choice(["0", "omit"]),
+)
 def main(
     entrypoint: Literal["updates", "stream"],
     update_type: Literal["update", "delete", "overwrite"],
+    stream_type: Literal[
+        "default", "ignoreDeletes", "ignoreChanges", "skipChangeCommits", "cdf"
+    ],
+    starting_version: Literal["0", "omit"],
 ) -> None:
     spark = get_spark_session_with_delta()
     initialize_delta_table(spark)
@@ -86,7 +153,9 @@ def main(
         case "updates":
             updates(spark=spark, update_type=update_type)
         case "stream":
-            stream(spark)
+            stream(
+                spark=spark, stream_type=stream_type, starting_version=starting_version
+            )
         case _:
             raise ValueError(f"Unknown entrypoint: {entrypoint}")
 
